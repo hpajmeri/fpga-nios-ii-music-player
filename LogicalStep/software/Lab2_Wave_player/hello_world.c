@@ -1,0 +1,338 @@
+/*
+ * "Hello World" example.
+ *
+ * This example prints 'Hello from Nios II' to the STDOUT stream. It runs on
+ * the Nios II 'standard', 'full_featured', 'fast', and 'low_cost' example
+ * designs. It runs with or without the MicroC/OS-II RTOS and requires a STDOUT
+ * device in your system's hardware.
+ * The memory footprint of this hosted application is ~69 kbytes by default
+ * using the standard reference design.
+ *
+ * For a reduced footprint version of this template, and an explanation of how
+ * to reduce the memory footprint for a given application, see the
+ * "small_hello_world" template.
+ *
+ */
+
+#include <stdio.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdint.h>
+#include <system.h>
+
+#include "altera_avalon_pio_regs.h"
+#include "sys/alt_irq.h"
+
+#include <sys/alt_alarm.h>
+#include <io.h>
+
+#include "fatfs.h"
+#include "diskio.h"
+
+#include "ff.h"
+#include "monitor.h"
+#include "uart.h"
+
+#include "alt_types.h"
+
+#include <altera_up_avalon_audio.h>
+#include <altera_up_avalon_audio_and_video_config.h>
+#include <altera_up_avalon_audio_regs.h>
+
+uint8_t pb_val = 0;
+
+int isWav(char* fileName) {
+	int length = strlen(fileName);
+	if (fileName[length-4] != '.' || fileName[length-3] != 'W' || fileName[length-2] != 'A' || fileName[length-1] != 'V') {
+		return 1;
+	}
+	return 0;
+}
+
+static void button_ISR(void *context, alt_u32 id) {
+	// disable button interrupts
+	IOWR(BUTTON_PIO_BASE, 2, 0x0);
+	// set period
+	IOWR(TIMER_0_BASE, 0x02, 0xE360);
+	IOWR(TIMER_0_BASE, 0x03, 0x0016);
+	// Enable Timer
+	IOWR(TIMER_0_BASE, 0x01, 0x05);
+}
+
+static void timer_ISR(void *context, alt_u32 id) {
+	// read data from button
+	uint8_t data = IORD(BUTTON_PIO_BASE, 0);
+	// if button is not default, store data in global variable
+	if (data != 15) {
+		pb_val = data;
+	}
+	// acknowledge interrupt request by clearing status register
+	IOWR(TIMER_0_BASE, 0, 0);
+	IOWR(TIMER_0_BASE, 1, 0);
+	// clear button interrupt
+	IOWR(BUTTON_PIO_BASE, 0x03, 0x0);
+	// enable button interrupt
+	IOWR(BUTTON_PIO_BASE, 0x02, 0x0F);
+}
+
+int main() {
+
+	FATFS Fatfs[_VOLUMES];
+	DIR Dir;
+	FILINFO Finfo;
+	uint32_t p1 = 0;
+	uint32_t res;
+	uint32_t s1 = 0;
+	uint32_t s2 = 0;
+	uint32_t p2 = 0;
+	char* ptr = NULL;
+	FATFS *fs;
+	char* fileNames[20][20];
+	uint32_t length[20];
+	uint32_t index[20];
+	uint8_t Buff[1024] __attribute__ ((aligned(4)));
+	uint32_t cnt, blen = sizeof(Buff);
+	alt_up_audio_dev * audio_dev;
+	int i;
+	FIL currFile;
+	int currPos;
+	int play;
+	int totalCount;
+	char* name;
+	int currIndex;
+	int len;
+	int num;
+	int switch_val;
+	unsigned int leftbuf;
+	unsigned int rightbuf;
+	FILE *lcd;
+
+	alt_irq_register( BUTTON_PIO_IRQ, (void *) 0, button_ISR);
+	alt_irq_register( TIMER_0_IRQ, (void *) 0, timer_ISR);
+
+	//opening LCD
+	lcd = fopen("/dev/lcd_display", "w");
+
+	// clear previous timer
+	IOWR(TIMER_0_BASE, 0x01, 0x0);
+
+	// enable button_IRQ
+	IOWR(BUTTON_PIO_BASE, 0x02, 0x0F);
+
+	i = 0;
+
+	audio_dev = alt_up_audio_open_dev("/dev/Audio");
+
+	// initialize global
+	currPos = 44;
+	i = 0;
+	currIndex = 0;
+	totalCount = 0;
+	play = 0;
+	pb_val = 15;
+	int pauseOrStop = 0;
+
+	// register interrupts
+
+	for (i = 0; i < 20; ++i) {
+		memset(fileNames[i], 0, 20);
+		length[i] = 0;
+	}
+
+	int isWavRes;
+
+	disk_initialize((uint8_t ) p1); 		// di 0
+	f_mount((uint8_t) p1, &Fatfs[p1]); 	// fi 0
+
+	i = 0;
+	int j = 0;
+
+	// get list of wav files
+	res = f_opendir(&Dir, ptr);			// fl
+	for (j = 0;;++j) {
+		res = f_readdir(&Dir, &Finfo);
+		if ((res != FR_OK) || !Finfo.fname[0])
+			break;
+
+		isWavRes = isWav(&(Finfo.fname[0]));
+
+		if (isWavRes == 0) {
+			memcpy(fileNames + i, &Finfo.fname[0], 13);
+			length[i] = Finfo.fsize;
+			index[i] = j;
+			++totalCount;
+			++i;
+		}
+	}
+
+	name = fileNames[0];
+	len = length[0];
+	num = index[0];
+	int mono = 0;
+	int speed = 4;
+	int half = 0;
+
+	fprintf(lcd, "%c%s", 27, "[2J");
+	fprintf(lcd, "%d. %s\n", num, name);
+	fprintf(lcd, "STOPPED\n");
+
+	// play music
+	while (1) {
+		if (play == 1) {
+
+			switch_val = IORD(SWITCH_PIO_BASE, 0) & (0x3);
+			mono = 0;
+			speed = 4;
+			half = 0;
+			fprintf(lcd, "%c%s", 27, "[2J");
+			fprintf(lcd, "%d. %s\n", num, name);
+
+			switch (switch_val) {
+			case 0:
+				fprintf(lcd, "PBACK-NORM SPD\n");
+				break;
+			case 1:
+				fprintf(lcd, "PBACK–HALF SPD\n");
+				half = 1;
+				break;
+			case 2:
+				fprintf(lcd, "PBACK–DBL SPD\n");
+				speed = 8;
+				break;
+			case 3:
+				fprintf(lcd, "PBACK–MONO\n");
+				mono = 1;
+				break;
+			}
+
+
+			f_open(&currFile, name, (uint8_t) 1);
+
+			f_lseek(&currFile, currPos);
+			cnt = 0;
+			p1 = len - currPos;
+			p2 = 0;
+
+			while (p1)
+			{
+				if ((uint32_t) p1 >= blen)
+				{
+					cnt = blen;
+					p1 -= blen;
+				}
+				else
+				{
+					cnt = p1;
+					p1 = 0;
+				}
+				res = f_read(&currFile, Buff, cnt, &s2);
+				for (i = 0; i < cnt; i += speed)
+				{
+					if (pb_val != 15)
+						break;
+					currPos += speed;
+					leftbuf = Buff[i + 1] << 8 | Buff[i];
+					rightbuf = Buff[i + 3] << 8 | Buff[i + 2];
+
+					// write audio buffer
+					while (alt_up_audio_write_fifo_space(audio_dev,
+					ALT_UP_AUDIO_LEFT)  == 0) {}
+
+					if (mono)
+					{
+						IOWR_ALT_UP_AUDIO_RIGHTDATA(AUDIO_BASE, (rightbuf));
+						IOWR_ALT_UP_AUDIO_LEFTDATA(AUDIO_BASE, (rightbuf));
+					}
+					else
+					{
+						IOWR_ALT_UP_AUDIO_RIGHTDATA(AUDIO_BASE, (rightbuf));
+						IOWR_ALT_UP_AUDIO_LEFTDATA(AUDIO_BASE, (leftbuf));
+					}
+
+					if (half)
+					{
+						while (alt_up_audio_write_fifo_space(audio_dev,
+						ALT_UP_AUDIO_LEFT) == 0) {}
+
+						IOWR_ALT_UP_AUDIO_RIGHTDATA(AUDIO_BASE, (rightbuf));
+						IOWR_ALT_UP_AUDIO_LEFTDATA(AUDIO_BASE, (leftbuf));
+					}
+
+					p2 += s2; // increment p2 by the s2 referenced value
+				}
+				if (pb_val != 15)
+					break;
+			}
+
+			f_close(&currFile);
+
+			if (len - currPos < 4) {
+				play = 0;
+				currPos = 44;
+				i = 0;
+				p2 = 0;
+			}
+		}
+
+		while (play == 0) {
+			if (pb_val != 15)
+				break;
+		}
+
+//		printf("%d\n", pb_val);
+
+		switch (pb_val) {
+		case 14:
+			currPos = 44;
+			++currIndex;
+			currIndex %= totalCount;
+			name = fileNames[currIndex];
+			len = length[currIndex];
+			num = index[currIndex];
+			pb_val = 15;
+			break;
+		case 13:
+			if (play == 1) {
+				play = 0;
+				pauseOrStop = 0;
+			} else {
+				play = 1;
+			}
+			pb_val = 15;
+			break;
+		case 11:
+			pauseOrStop = 1;
+			currPos = 44;
+			play = 0;
+			pb_val = 15;
+			break;
+		case 7:
+			currPos = 44;
+			--currIndex;
+			if (currIndex < 0)
+				currIndex += totalCount;
+			name = fileNames[currIndex];
+			len = length[currIndex];
+			num = index[currIndex];
+			pb_val = 15;
+			break;
+		}
+		fprintf(lcd, "%c%s", 27, "[2J");
+		fprintf(lcd, "%d. %s\n", num, name);
+		if(pauseOrStop==1)
+		{
+			fprintf(lcd,"STOPPED\n");
+		}
+		else
+		{
+			fprintf(lcd,"PAUSED\n");
+		}
+	}
+
+	res = f_getfree(ptr, (uint32_t *) &p1, &fs);
+
+	f_close(lcd);
+	return 0;
+}

@@ -1,0 +1,203 @@
+/*
+ * "Hello World" example.
+ *
+ * This example prints 'Hello from Nios II' to the STDOUT stream. It runs on
+ * the Nios II 'standard', 'full_featured', 'fast', and 'low_cost' example
+ * designs. It runs with or without the MicroC/OS-II RTOS and requires a STDOUT
+ * device in your system's hardware.
+ * The memory footprint of this hosted application is ~69 kbytes by default
+ * using the standard reference design.
+ *
+ * For a reduced footprint version of this template, and an explanation of how
+ * to reduce the memory footprint for a given application, see the
+ * "small_hello_world" template.
+ *
+ */
+
+#include <stdio.h>
+#include <unistd.h>
+#include "system.h"
+#include "altera_avalon_pio_regs.h"
+#include "sys/alt_irq.h"
+
+int background() {
+	int j;
+	int x = 0;
+	int grainsize = 4;
+	int g_taskProcessed = 0;
+
+	for (j = 0; j < grainsize; j++) {
+		g_taskProcessed++;
+	}
+	return x;
+}
+
+static void ISR(void *context, alt_u32 id)
+{
+	IOWR(LED_PIO_BASE, 0, 4);
+
+	IOWR(RESPONSE_OUT_BASE, 0, 1);
+	IOWR(RESPONSE_OUT_BASE, 0, 0);
+
+	IOWR(STIMULUS_IN_BASE, 3, 0);
+
+	IOWR(LED_PIO_BASE, 0, 0);
+
+}
+
+static void interrupt_mode (void)
+{
+	IOWR(STIMULUS_IN_BASE, 3, 0);
+	alt_irq_register(STIMULUS_IN_IRQ, (void*)0, ISR);
+	IOWR(STIMULUS_IN_BASE, 2, 0xFFFF);
+
+	alt_u16 i;
+	alt_u16 count;
+
+	for (i = 2; i < 2501; i += 2) {
+		// set count to 0
+		count = 0;
+		// make sure egm enable is 0
+		IOWR(EGM_BASE, 0, 0);
+		// period
+		IOWR(EGM_BASE, 2, i);
+		// pulse
+		IOWR(EGM_BASE, 3, i / 2);
+
+		IOWR(LED_PIO_BASE, 0, 2);
+		IOWR(LED_PIO_BASE, 0, 0);
+
+		// enable
+		IOWR(EGM_BASE, 0, 1);
+
+		while (IORD(EGM_BASE,1) == 1) {
+			IOWR(LED_PIO_BASE, 0, 1);
+			background();
+			++count;
+			IOWR(LED_PIO_BASE, 0, 0);
+		}
+
+		alt_u16 latency = IORD(EGM_BASE, 4);
+		alt_u16 missed_pulses = IORD(EGM_BASE, 5);
+		alt_u16 multi_pulses = IORD(EGM_BASE, 6);
+
+		printf("%d,%d,%d,%d,%d,%d\n",i,i/2,count,latency,missed_pulses,multi_pulses);
+
+		// disable bit
+		IOWR(EGM_BASE, 0, 0);
+
+	}
+}
+
+static void tight_polling (void)
+{
+	int i;
+	for (i = 2; i < 2501; i += 2) {
+		int new_pulse;
+		int count;
+		int bkgd_task;
+		int characterization_cycle;
+
+		// set count to 0
+		count = 0;
+		bkgd_task = 0;
+		new_pulse=1;
+		characterization_cycle=1;
+		// make sure egm enable is 0
+		IOWR(EGM_BASE, 0, 0);
+		// period
+		IOWR(EGM_BASE, 2, i);
+		// pulse
+		IOWR(EGM_BASE, 3, i / 2);
+
+		IOWR(LED_PIO_BASE, 0, 2);
+
+		// enable
+		IOWR(EGM_BASE, 0, 1);
+
+
+		while(IORD(EGM_BASE,1)==1)
+		{
+			int stimulus = IORD(STIMULUS_IN_BASE,0);
+
+			if(stimulus==1 && new_pulse==1)
+			{
+				IOWR(RESPONSE_OUT_BASE, 0, 1);
+				IOWR(RESPONSE_OUT_BASE, 0, 0);
+
+				new_pulse = 0;
+
+				if(characterization_cycle == 0)
+				{
+					int j;
+					for(j=0; j<bkgd_task-1; ++j)
+					{
+						IOWR(LED_PIO_BASE, 0, 1);
+						background();
+						IOWR(LED_PIO_BASE, 0, 0);
+						count++;
+					}
+				} else {
+					while(characterization_cycle == 1)
+					{
+						IOWR(LED_PIO_BASE, 0, 1);
+						background();
+						IOWR(LED_PIO_BASE, 0, 0);
+						bkgd_task++;
+						count++;
+						stimulus = IORD(STIMULUS_IN_BASE,0);
+
+						if(stimulus==0)
+						{
+							new_pulse =1;
+						}
+						if(stimulus==1 && new_pulse==1)
+						{
+							characterization_cycle = 0;
+						}
+					}
+				}
+			}
+
+			if(stimulus == 0)
+			{
+				new_pulse =1;
+			}
+		}
+		alt_u16 latency = IORD(EGM_BASE, 4);
+		alt_u16 missed_pulses = IORD(EGM_BASE, 5);
+		alt_u16 multi_pulses = IORD(EGM_BASE, 6);
+
+		printf("%d,%d,%d,%d,%d,%d\n",i,i/2,count,latency,missed_pulses,multi_pulses);
+		// disable bit
+		IOWR(EGM_BASE, 0, 0);
+	}
+}
+
+int main() {
+	while (1) {
+
+		int switch_val = IORD(SWITCH_PIO_BASE,0);
+		switch(switch_val)
+		{
+		case 1:
+			printf("Interrupt method selected.\n");
+			printf("Please, press PB0 to continue.\n");
+			printf("Period, Pulse_Width, BT_run, Latency, Missed, Multiple\n");
+			while(IORD(BUTTON_PIO_BASE,0)!=14){}
+			interrupt_mode();
+			break;
+		case 3:
+			printf("Tight polling method selected.\n");
+			printf("Please, press PB0 to continue.\n");
+			printf("Period, Pulse_Width, BT_run, Latency, Missed, Multiple\n");
+			while(IORD(BUTTON_PIO_BASE,0)!=14){}
+			tight_polling();
+			break;
+		default:
+			break;
+		}
+	}
+
+	return 0;
+}
